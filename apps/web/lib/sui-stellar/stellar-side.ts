@@ -129,7 +129,8 @@ export type CompleteResult =
   | { status: "submitted" | "failed"; hash: string; ledger?: number };
 
 // A Vercel instance serves many requests; this stops the same instance from sending one digest twice
-// at once. Two instances racing is possible and costs one failed (reverted) fee, never funds.
+// at once. Two instances racing is possible and costs one failed (reverted) fee, never funds; the
+// loser re-reads `mintState` after its transaction fails, so its caller still hears "delivered".
 const inFlight = new Set<string>();
 
 function hexBytes(hex: string): Buffer {
@@ -313,9 +314,13 @@ export async function completeBurn(
     // stellar-sdk 13 cannot decode protocol 23+ result meta, so confirm through Horizon's JSON.
     const confirmed = await confirmViaHorizon(sent.hash);
     if (!confirmed) return { status: "submitted", hash: sent.hash };
-    return confirmed.successful
-      ? { status: "submitted", hash: sent.hash, ledger: confirmed.ledger }
-      : { status: "failed", hash: sent.hash, ledger: confirmed.ledger };
+    if (confirmed.successful) {
+      return { status: "submitted", hash: sent.hash, ledger: confirmed.ledger };
+    }
+    // Failed on chain. If another instance completed the same message first, the nonce is now used
+    // and the USDC has arrived: tell the caller it was delivered, not that it failed.
+    if ((await mintState(att, keypair.publicKey())) === "delivered") return { status: "delivered" };
+    return { status: "failed", hash: sent.hash, ledger: confirmed.ledger };
   } finally {
     inFlight.delete(key);
   }

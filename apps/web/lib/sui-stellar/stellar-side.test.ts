@@ -1,75 +1,124 @@
-import { Account, rpc } from "@stellar/stellar-sdk";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { Account, Keypair, Networks, StrKey, nativeToScVal } from "@stellar/stellar-sdk";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// The relayer, and the person receiving the mint. Both are throwaway keys.
+const relayer = Keypair.random();
+const recipient = Keypair.random().publicKey();
+
+const getAccount = vi.fn();
+const simulateTransaction = vi.fn();
+const prepareTransaction = vi.fn();
+const sendTransaction = vi.fn();
+
+vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
+  const sdk = await importOriginal<typeof import("@stellar/stellar-sdk")>();
+  class Server {
+    getAccount = getAccount;
+    simulateTransaction = simulateTransaction;
+    prepareTransaction = prepareTransaction;
+    sendTransaction = sendTransaction;
+  }
+  return { ...sdk, rpc: { ...sdk.rpc, Server } };
+});
 
 vi.mock("../env", () => ({
   env: {
-    sorobanRpcUrl: "https://soroban-rpc.example.com",
-    stellarNetworkPassphrase: "Public Global Stellar Network ; September 2015",
-    usdcSacAddress: "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75",
+    sorobanRpcUrl: "http://soroban.test",
+    horizonUrl: "http://horizon.test",
+    stellarNetworkPassphrase: Networks.TESTNET,
+    usdcSacAddress: StrKey.encodeContract(Buffer.alloc(32, 1)),
+    cctpTokenMessengerId: "messenger",
   },
 }));
 
-const { recipientStatus } = await import("./stellar-side");
+vi.mock("../aptos/config", () => ({
+  APTOS_CCTP_DOMAIN: 9,
+  aptosDestinations: () => [],
+}));
 
-const RECIPIENT = "GBHC3U6RUUU5NRX7SHZ2XC5HA5JIG364LOMVJLYWM72JFBANWSWYJ7ZV";
+vi.mock("./attestation", () => ({
+  readAttestation: async () => ({ state: "complete", message: "0x00", attestation: "0x00" }),
+}));
 
-describe("recipientStatus", () => {
-  beforeEach(() => {
-    vi.restoreAllMocks();
+vi.mock("@xebra/sdk/core", async (importOriginal) => {
+  const core = await importOriginal<typeof import("@xebra/sdk/core")>();
+  return { ...core, verifyMessage: () => ({ recipient, amount: 5_000_000n }) };
+});
+
+const { completeBurn } = await import("./stellar-side");
+
+const DIGEST = "8JD7n6LKxQWj3sR5gYVd4XcFz2pNhT9mUeAbCqKoLiPs";
+const HASH = "ab".repeat(32);
+
+/** The recipient holds a USDC trustline. */
+const balanceSim = { result: { retval: nativeToScVal(0n, { type: "i128" }) } };
+/** Circle's transmitter refuses a message whose nonce is already used: the mint has happened. */
+const alreadyMinted = { error: "HostError: Error(Contract, #6908)" };
+/** The mint would still go through: nobody has completed it. */
+const stillOpen = { result: { retval: nativeToScVal(null) } };
+
+function horizonSays(successful: boolean) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => ({ ok: true, json: async () => ({ successful, ledger: 4242 }) })),
+  );
+}
+
+beforeEach(() => {
+  getAccount.mockReset().mockImplementation(async (id: string) => new Account(id, "1"));
+  simulateTransaction.mockReset();
+  prepareTransaction.mockReset().mockResolvedValue({ sign: vi.fn() });
+  sendTransaction.mockReset().mockResolvedValue({ status: "PENDING", hash: HASH });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("completeBurn when the transaction fails on chain", () => {
+  it("reports delivered when another instance already completed the same mint", async () => {
+    horizonSays(false);
+    // First the recipient's trustline check, then the post-failure mint state check.
+    simulateTransaction.mockResolvedValueOnce(balanceSim).mockResolvedValueOnce(alreadyMinted);
+
+    const result = await completeBurn(DIGEST, relayer.secret());
+
+    expect(result).toEqual({ status: "delivered" });
+    expect(sendTransaction).toHaveBeenCalledTimes(1);
+    expect(simulateTransaction).toHaveBeenCalledTimes(2);
   });
 
-  it("returns exists:false when stellar-sdk throws Account not found (404)", async () => {
-    vi.spyOn(rpc.Server.prototype, "getAccount").mockRejectedValueOnce({
-      code: 404,
-      message: `Account not found: ${RECIPIENT}`,
-    });
+  it("still reports failed when the mint has not happened", async () => {
+    horizonSays(false);
+    simulateTransaction.mockResolvedValueOnce(balanceSim).mockResolvedValueOnce(stillOpen);
 
-    const status = await recipientStatus(RECIPIENT);
-    expect(status).toEqual({
-      exists: false,
-      hasTrustline: false,
-      balance: 0n,
+    expect(await completeBurn(DIGEST, relayer.secret())).toEqual({
+      status: "failed",
+      hash: HASH,
+      ledger: 4242,
     });
   });
 
-  it("returns exists:false when Error message contains 'account not found'", async () => {
-    vi.spyOn(rpc.Server.prototype, "getAccount").mockRejectedValueOnce(
-      new Error(`Account not found: ${RECIPIENT}`),
-    );
+  it("still reports failed when the mint state cannot be read", async () => {
+    horizonSays(false);
+    simulateTransaction
+      .mockResolvedValueOnce(balanceSim)
+      .mockRejectedValueOnce(new Error("rpc down"));
 
-    const status = await recipientStatus(RECIPIENT);
-    expect(status).toEqual({
-      exists: false,
-      hasTrustline: false,
-      balance: 0n,
-    });
+    expect(await completeBurn(DIGEST, relayer.secret())).toMatchObject({ status: "failed" });
   });
+});
 
-  it("rethrows when Soroban RPC fails with a network or 5xx error", async () => {
-    const networkError = new Error("fetch failed: socket hang up");
-    vi.spyOn(rpc.Server.prototype, "getAccount").mockRejectedValueOnce(networkError);
+describe("completeBurn when the transaction succeeds", () => {
+  it("reports submitted and does not re-check the mint state", async () => {
+    horizonSays(true);
+    simulateTransaction.mockResolvedValueOnce(balanceSim);
 
-    await expect(recipientStatus(RECIPIENT)).rejects.toThrow("fetch failed: socket hang up");
-
-    const rpc500 = { code: 500, message: "Internal server error" };
-    vi.spyOn(rpc.Server.prototype, "getAccount").mockRejectedValueOnce(rpc500);
-
-    await expect(recipientStatus(RECIPIENT)).rejects.toMatchObject({ code: 500 });
-  });
-
-  it("returns exists:true and hasTrustline:false when simulation indicates missing trustline", async () => {
-    vi.spyOn(rpc.Server.prototype, "getAccount").mockResolvedValueOnce(
-      new Account(RECIPIENT, "100"),
-    );
-    vi.spyOn(rpc.Server.prototype, "simulateTransaction").mockResolvedValueOnce({
-      error: "Error(Contract, #1): trustline entry is missing for account",
-    } as unknown as rpc.Api.SimulateTransactionResponse);
-
-    const status = await recipientStatus(RECIPIENT);
-    expect(status).toEqual({
-      exists: true,
-      hasTrustline: false,
-      balance: 0n,
+    expect(await completeBurn(DIGEST, relayer.secret())).toEqual({
+      status: "submitted",
+      hash: HASH,
+      ledger: 4242,
     });
+    expect(simulateTransaction).toHaveBeenCalledTimes(1);
   });
 });
