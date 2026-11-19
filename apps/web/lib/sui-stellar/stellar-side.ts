@@ -42,13 +42,37 @@ export interface RecipientStatus {
 
 const MISSING_TRUSTLINE = "trustline entry is missing for account";
 
+function isAccountNotFoundError(err: unknown): boolean {
+  if (err && typeof err === "object") {
+    const e = err as {
+      code?: unknown;
+      status?: unknown;
+      message?: unknown;
+      response?: { status?: unknown };
+    };
+    if (e.code === 404 || e.status === 404 || e.response?.status === 404) {
+      return true;
+    }
+    if (typeof e.message === "string" && /account not found/i.test(e.message)) {
+      return true;
+    }
+  }
+  if (err instanceof Error && /account not found/i.test(err.message)) {
+    return true;
+  }
+  return false;
+}
+
 export async function recipientStatus(recipient: string): Promise<RecipientStatus> {
   const server = new rpc.Server(env.sorobanRpcUrl);
   let account: Awaited<ReturnType<rpc.Server["getAccount"]>>;
   try {
     account = await server.getAccount(recipient);
-  } catch {
-    return { exists: false, hasTrustline: false, balance: 0n };
+  } catch (err) {
+    if (isAccountNotFoundError(err)) {
+      return { exists: false, hasTrustline: false, balance: 0n };
+    }
+    throw err;
   }
   const tx = new TransactionBuilder(account, {
     fee: BASE_FEE,
