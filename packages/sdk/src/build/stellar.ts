@@ -6,6 +6,7 @@ import {
   TransactionBuilder,
   nativeToScVal,
 } from "@stellar/stellar-sdk";
+import { XebraError } from "../errors.js";
 import type { TransferStep } from "./types.js";
 
 /**
@@ -198,23 +199,20 @@ export class StellarSimulationError extends Error {
 }
 
 /**
- * An error rejected by the builder before submission, carrying an API-style code.
+ * An error the builder rejects before submission: an API-style `code` and, when one input is at
+ * fault, its `field`. A `XebraError`, so callers can match every SDK error the same way.
  */
-export class XebraError extends Error {
-  readonly code: string;
+export class StellarBuildError extends XebraError {
   readonly field?: string;
 
   constructor(code: string, message: string, field?: string) {
-    super(message);
-    this.name = "XebraError";
-    this.code = code;
+    super(code, message);
+    this.name = "StellarBuildError";
     if (field !== undefined) {
       this.field = field;
     }
   }
 }
-
-export { XebraError as StellarBuildError };
 
 /** The three Soroban RPC calls a build makes; `rpc.Server` satisfies it. */
 export interface StellarBuildRpc {
@@ -242,16 +240,28 @@ export async function buildStellarBridge(
   now: number = Date.now(),
 ): Promise<TransferStep> {
   if (p.amount <= 0n) {
-    throw new XebraError("invalid_amount", "amount must be greater than zero", "amount");
+    throw new StellarBuildError("invalid_amount", "amount must be greater than zero", "amount");
   }
   if (p.ttlSeconds <= 0 || p.ttlSeconds > 3600) {
-    throw new XebraError("invalid_request", "ttlSeconds must be between 1 and 3600", "ttlSeconds");
+    throw new StellarBuildError(
+      "invalid_request",
+      "ttlSeconds must be between 1 and 3600",
+      "ttlSeconds",
+    );
   }
   if (p.mintRecipient.length !== 32) {
-    throw new XebraError("invalid_request", "mintRecipient must be 32 bytes", "mintRecipient");
+    throw new StellarBuildError(
+      "invalid_request",
+      "mintRecipient must be 32 bytes",
+      "mintRecipient",
+    );
   }
   if (p.recipientOwner && p.recipientOwner.length !== 32) {
-    throw new XebraError("invalid_request", "recipientOwner must be 32 bytes", "recipientOwner");
+    throw new StellarBuildError(
+      "invalid_request",
+      "recipientOwner must be 32 bytes",
+      "recipientOwner",
+    );
   }
 
   const contract = new Contract(cfg.wrapperContractId);
@@ -264,7 +274,7 @@ export async function buildStellarBridge(
       (err as { status?: number })?.status ??
       (err as { response?: { status?: number } })?.response?.status;
     if (/account not found/i.test(message) || status === 404) {
-      throw new XebraError(
+      throw new StellarBuildError(
         "account_not_found",
         "This Stellar account does not exist yet. Fund it with XLM first.",
       );

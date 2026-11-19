@@ -8,11 +8,11 @@ import {
   type xdr,
 } from "@stellar/stellar-sdk";
 import { describe, expect, it } from "vitest";
+import { XebraError } from "../errors.js";
 import {
   APPROVAL_TTL_LEDGERS,
   type StellarBuildRpc,
   StellarSimulationError,
-  XebraError,
   buildStellarBridge,
 } from "./stellar.js";
 

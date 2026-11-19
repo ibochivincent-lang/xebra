@@ -1,4 +1,5 @@
 import { recipientAndHook } from "@xebra/cctp-evm";
+import { XebraError } from "../errors.js";
 import type { BurnRecipient } from "./evm.js";
 import type { TransferStep } from "./types.js";
 
@@ -32,20 +33,19 @@ import type { TransferStep } from "./types.js";
 type Hex = `0x${string}`;
 
 /**
- * An error rejected by the Aptos builder or validator, carrying an API code and the invalid field name.
+ * An error the Aptos builder or validator rejects, carrying an API `code` and the invalid `field`.
+ * A `XebraError`, so callers can match every SDK error the same way.
  */
-export class AptosBuildError extends Error {
+export class AptosBuildError extends XebraError {
   constructor(
-    readonly code: string,
+    code: string,
     readonly field: string,
     message: string,
   ) {
-    super(message);
+    super(code, message);
     this.name = "AptosBuildError";
   }
 }
-
-export { AptosBuildError as XebraError };
 
 /** Aptos's CCTP domain. */
 export const APTOS_DOMAIN = 9;
