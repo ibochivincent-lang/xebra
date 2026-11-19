@@ -30,6 +30,7 @@ import {
   watchEvmWallets,
 } from "../../lib/wallets/evm";
 import {
+  broadcastSolana,
   connectSolana,
   sendSolanaTransaction,
   solanaEntries,
@@ -83,27 +84,7 @@ interface WalletContextValue {
   sendSolana: (transactionBase64: string) => Promise<string>;
 }
 
-/**
- * Broadcasts signed bytes through our RPC proxy (`/api/solana-rpc`): Solana's public RPC refuses
- * browsers. A plain fetch, so the wallet layer loads no Solana SDK.
- */
-async function broadcastSolana(signed: Uint8Array): Promise<string> {
-  let binary = "";
-  for (const b of signed) binary += String.fromCharCode(b);
-  const res = await fetch("/api/solana-rpc", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "sendTransaction",
-      params: [btoa(binary), { encoding: "base64", preflightCommitment: "confirmed" }],
-    }),
-  });
-  const body = (await res.json()) as { result?: string; error?: { message?: string } };
-  if (typeof body.result === "string") return body.result;
-  throw new Error(body.error?.message ?? `Solana refused the transaction (${res.status}).`);
-}
+export { broadcastSolana };
 
 export interface SuiSigner {
   wallet: SuiWalletEntry;
